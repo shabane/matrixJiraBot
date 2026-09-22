@@ -3,6 +3,7 @@ dispatches them to commands.py. Ignores its own messages and any history
 from before it started, to avoid feedback loops and replaying old events."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -36,31 +37,41 @@ class Bot:
         if room_cfg is None:
             return  # not a room we're configured to act in
 
-        body = event.body or ""
-        mentions = list(event.source.get("content", {}).get("m.mentions", {}).get("user_ids", []))
-        sender_name = room.user_name(event.sender) or event.sender
+        try:
+            body = event.body or ""
+            mentions = list(event.source.get("content", {}).get("m.mentions", {}).get("user_ids", []))
+            sender_name = room.user_name(event.sender) or event.sender
 
-        result = parse_and_run(
-            body=body,
-            room=room_cfg,
-            config=self.config,
-            jira=self.jira,
-            sender_display_name=sender_name,
-            mentioned_matrix_ids=mentions,
-        )
-        if result is None:
-            return
+            # parse_and_run makes synchronous, blocking Jira HTTP calls. Running it in
+            # a thread keeps the event loop free to keep processing other rooms/events
+            # while it's in flight, instead of stalling the whole bot for up to
+            # REQUEST_TIMEOUT_SECONDS on every command.
+            result = await asyncio.to_thread(
+                parse_and_run,
+                body=body,
+                room=room_cfg,
+                config=self.config,
+                jira=self.jira,
+                sender_display_name=sender_name,
+                mentioned_matrix_ids=mentions,
+            )
+            if result is None:
+                return
 
-        log.info("%s ran %r in %s -> ok=%s", event.sender, body, room.room_id, result.ok)
-        await self.client.room_send(
-            room_id=room.room_id,
-            message_type="m.room.message",
-            content={
-                "msgtype": "m.text",
-                "body": result.message,
-                "m.relates_to": {"m.in_reply_to": {"event_id": event.event_id}},
-            },
-        )
+            log.info("%s ran %r in %s -> ok=%s", event.sender, body, room.room_id, result.ok)
+            await self.client.room_send(
+                room_id=room.room_id,
+                message_type="m.room.message",
+                content={
+                    "msgtype": "m.text",
+                    "body": result.message,
+                    "m.relates_to": {"m.in_reply_to": {"event_id": event.event_id}},
+                },
+            )
+        except Exception:
+            # nio's callback dispatcher has no exception handling of its own, so an
+            # uncaught error here would otherwise vanish silently. Always log it.
+            log.exception("Error handling message %r from %s in %s", event.body, event.sender, room.room_id)
 
     async def run(self) -> None:
         self.client.add_event_callback(self.on_message, RoomMessageText)
@@ -75,5 +86,10 @@ class Bot:
             await self.client.join(room.room_id)
             log.info("Watching room %s (%s -> project %s)", room.room_id, room.name or "unnamed", room.project_key)
 
+        # One full-state sync to load initial room state, then incremental syncs only --
+        # passing full_state=True to sync_forever would (incorrectly) re-request full
+        # state on every poll, not just the first.
+        await self.client.sync(timeout=30000, full_state=True)
+
         log.info("matrix-jira-bot is running.")
-        await self.client.sync_forever(timeout=30000, full_state=True)
+        await self.client.sync_forever(timeout=30000)

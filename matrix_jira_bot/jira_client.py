@@ -4,9 +4,29 @@ from __future__ import annotations
 
 import requests
 
+# Every request must fail fast rather than hang. Without this, a network
+# problem reaching Jira would block forever -- and since this client is
+# called from inside the bot's single-threaded async event loop, a single
+# hung request would silently freeze the entire bot for every room.
+REQUEST_TIMEOUT_SECONDS = 10
+
 
 class JiraError(Exception):
     pass
+
+
+def _with_default_timeout(request_func):
+    """Wraps Session.request so every call gets a timeout unless one is
+    explicitly passed, and so connection/timeout failures surface as a
+    JiraError the rest of the bot already knows how to turn into a clean
+    reply in the room, instead of an unhandled exception."""
+    def wrapped(method, url, **kwargs):
+        kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+        try:
+            return request_func(method, url, **kwargs)
+        except requests.exceptions.RequestException as e:
+            raise JiraError(f"Could not reach Jira ({url}): {e}") from e
+    return wrapped
 
 
 class JiraClient:
@@ -17,6 +37,7 @@ class JiraClient:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         })
+        self.session.request = _with_default_timeout(self.session.request)
 
     def _url(self, path: str) -> str:
         return f"{self.base_url}{path}"
