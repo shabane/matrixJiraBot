@@ -45,6 +45,7 @@ def parse_and_run(
     jira: JiraClient,
     sender_display_name: str,
     mentioned_matrix_ids: list[str],
+    quoted_text: Optional[str] = None,
 ) -> Optional[CommandResult]:
     body = body.strip()
     prefix = _match_prefix(body, config.command_prefixes)
@@ -59,7 +60,7 @@ def parse_and_run(
 
     try:
         if command == "ticket":
-            return _cmd_ticket(rest, room, config, jira, sender_display_name, mentioned_matrix_ids)
+            return _cmd_ticket(rest, room, config, jira, sender_display_name, mentioned_matrix_ids, quoted_text)
         if command == "comment":
             return _cmd_comment(rest, jira)
         if command == "assign":
@@ -76,7 +77,8 @@ def parse_and_run(
 
 
 def _cmd_ticket(rest: str, room: RoomConfig, config: Config, jira: JiraClient,
-                 sender_display_name: str, mentioned_matrix_ids: list[str]) -> CommandResult:
+                 sender_display_name: str, mentioned_matrix_ids: list[str],
+                 quoted_text: Optional[str] = None) -> CommandResult:
     usage = "Usage: /ticket [PROJECT] @user <summary text>"
     parts = rest.split(maxsplit=1)
     if not parts:
@@ -117,6 +119,7 @@ def _cmd_ticket(rest: str, room: RoomConfig, config: Config, jira: JiraClient,
         issuetype=config.jira.default_issue_type,
         assignee=user.jira_username,
         reporter_hint=sender_display_name,
+        quoted_text=quoted_text,
     )
     key = issue["key"]
     return CommandResult(ok=True, message=f"✅ Created {key} for @{user.alias} — {jira.issue_url(key)}")

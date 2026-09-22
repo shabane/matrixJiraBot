@@ -8,12 +8,26 @@ import logging
 import time
 
 from nio import AsyncClient, MatrixRoom, RoomMessageText
+from nio.responses import RoomGetEventResponse
 
 from .commands import parse_and_run
 from .config import Config
 from .jira_client import JiraClient
 
 log = logging.getLogger("matrix_jira_bot")
+
+
+def _strip_reply_fallback(body: str) -> str:
+    """Matrix clients prefix a reply's body with a quoted-text fallback
+    (lines starting with '>', then a blank line) before the text the user
+    actually typed. Strip it so command parsing sees only what was typed."""
+    lines = body.split("\n")
+    i = 0
+    while i < len(lines) and lines[i].startswith(">"):
+        i += 1
+    if i < len(lines) and lines[i] == "":
+        i += 1
+    return "\n".join(lines[i:])
 
 
 class Bot:
@@ -38,9 +52,15 @@ class Bot:
             return  # not a room we're configured to act in
 
         try:
-            body = event.body or ""
-            mentions = list(event.source.get("content", {}).get("m.mentions", {}).get("user_ids", []))
+            content = event.source.get("content", {})
+            body = _strip_reply_fallback(event.body or "")
+            mentions = list(content.get("m.mentions", {}).get("user_ids", []))
             sender_name = room.user_name(event.sender) or event.sender
+
+            quoted_text = None
+            reply_to_id = content.get("m.relates_to", {}).get("m.in_reply_to", {}).get("event_id")
+            if reply_to_id:
+                quoted_text = await self._fetch_quoted_text(room.room_id, reply_to_id)
 
             # parse_and_run makes synchronous, blocking Jira HTTP calls. Running it in
             # a thread keeps the event loop free to keep processing other rooms/events
@@ -54,6 +74,7 @@ class Bot:
                 jira=self.jira,
                 sender_display_name=sender_name,
                 mentioned_matrix_ids=mentions,
+                quoted_text=quoted_text,
             )
             if result is None:
                 return
@@ -72,6 +93,24 @@ class Bot:
             # nio's callback dispatcher has no exception handling of its own, so an
             # uncaught error here would otherwise vanish silently. Always log it.
             log.exception("Error handling message %r from %s in %s", event.body, event.sender, room.room_id)
+
+    async def _fetch_quoted_text(self, room_id: str, event_id: str) -> str | None:
+        """Fetches the message a command was sent as a reply to, so /ticket can
+        fold its text into the new issue's description. Best-effort: any
+        failure here shouldn't stop the command itself from running."""
+        try:
+            resp = await self.client.room_get_event(room_id, event_id)
+        except Exception:
+            log.exception("Failed to fetch replied-to event %s in %s", event_id, room_id)
+            return None
+        if not isinstance(resp, RoomGetEventResponse):
+            log.warning("Could not fetch replied-to event %s in %s: %s", event_id, room_id, resp)
+            return None
+        original_body = getattr(resp.event, "body", None)
+        if not original_body:
+            return None
+        original_sender = getattr(resp.event, "sender", "someone")
+        return f"{original_sender}: {original_body}"
 
     async def run(self) -> None:
         self.client.add_event_callback(self.on_message, RoomMessageText)

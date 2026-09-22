@@ -43,7 +43,8 @@ class JiraClient:
         return f"{self.base_url}{path}"
 
     def create_issue(self, project_key: str, summary: str, issuetype: str,
-                      assignee: str | None, reporter_hint: str | None = None) -> dict:
+                      assignee: str | None, reporter_hint: str | None = None,
+                      quoted_text: str | None = None) -> dict:
         fields = {
             "project": {"key": project_key},
             "summary": summary,
@@ -51,8 +52,13 @@ class JiraClient:
         }
         if assignee:
             fields["assignee"] = {"name": assignee}
+        description_parts = []
         if reporter_hint:
-            fields["description"] = f"Created via Matrix by {reporter_hint}."
+            description_parts.append(f"Created via Matrix by {reporter_hint}.")
+        if quoted_text:
+            description_parts.append(f"Quoted message:\n{quoted_text}")
+        if description_parts:
+            fields["description"] = "\n\n".join(description_parts)
         resp = self.session.post(self._url("/rest/api/2/issue"), json={"fields": fields})
         if not resp.ok:
             raise JiraError(f"Failed to create issue: {resp.status_code} {resp.text}")
