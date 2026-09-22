@@ -77,19 +77,42 @@ def parse_and_run(
 
 def _cmd_ticket(rest: str, room: RoomConfig, config: Config, jira: JiraClient,
                  sender_display_name: str, mentioned_matrix_ids: list[str]) -> CommandResult:
+    usage = "Usage: /ticket [PROJECT] @user <summary text>"
     parts = rest.split(maxsplit=1)
-    if len(parts) < 2:
-        return CommandResult(ok=False, message="Usage: /ticket @user <summary text>")
-    user_token, summary = parts[0], parts[1].strip()
+    if not parts:
+        return CommandResult(ok=False, message=usage)
+
+    first, remainder = parts[0], (parts[1] if len(parts) > 1 else "")
+
+    if first.startswith("@"):
+        # No project given -- fall back to this room's configured default.
+        project_key = room.project_key
+        user_token = first
+        summary = remainder.strip()
+    else:
+        # First token isn't a user mention, so treat it as an explicit project
+        # key override -- this is what lets one shared room file tickets
+        # against multiple boards.
+        project_key = first.upper()
+        sub = remainder.split(maxsplit=1)
+        if len(sub) < 2:
+            return CommandResult(ok=False, message=usage)
+        user_token, summary = sub[0], sub[1].strip()
+
+    if not project_key:
+        return CommandResult(
+            ok=False,
+            message="❓ This room has no default project. Specify one: /ticket <PROJECT> @user <summary text>",
+        )
     if not summary:
-        return CommandResult(ok=False, message="Usage: /ticket @user <summary text>")
+        return CommandResult(ok=False, message=usage)
 
     user = _resolve_user(config, user_token, mentioned_matrix_ids)
     if not user:
         return CommandResult(ok=False, message=f"❓ Unknown user '{user_token}'. Add them under 'users:' in config.yaml.")
 
     issue = jira.create_issue(
-        project_key=room.project_key,
+        project_key=project_key,
         summary=summary,
         issuetype=config.jira.default_issue_type,
         assignee=user.jira_username,

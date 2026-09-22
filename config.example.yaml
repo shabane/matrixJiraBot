@@ -9,8 +9,14 @@ matrix:
   access_token: "syt_xxx"   # long-lived access token for the bot's Matrix account
   device_id: ""              # optional; leave blank to let the server assign one
 
-  # One entry per Matrix room the bot should listen in. Each room maps 1:1
-  # to a Jira project: commands typed in a room act on that room's project.
+  # One entry per Matrix room the bot should listen in.
+  #
+  # project_key is optional. Set it for a room dedicated to one board, so
+  # "/ticket @user ..." just works without naming a project. Leave it unset
+  # for a room shared across multiple boards -- /ticket then requires the
+  # project explicitly: "/ticket CK @user ...". /comment, /assign, and
+  # /status are unaffected either way since they take an issue key, which
+  # already says which project it belongs to.
   rooms:
     - room_id: "!aaaaaaaaaaaaaaaaaa:example.org"
       project_key: "CK"
@@ -18,6 +24,9 @@ matrix:
     - room_id: "!bbbbbbbbbbbbbbbbbb:example.org"
       project_key: "CLM"
       name: "CLM scrum board"
+    # Example of a single shared room covering every board -- no project_key:
+    # - room_id: "!cccccccccccccccccc:example.org"
+    #   name: "All Jira activity"
 
 jira:
   url: "https://jira.example.org"

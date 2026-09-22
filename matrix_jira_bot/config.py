@@ -13,7 +13,11 @@ import yaml
 @dataclasses.dataclass
 class RoomConfig:
     room_id: str
-    project_key: str
+    # Optional: the default project /ticket creates issues in when the command
+    # doesn't specify one explicitly. Leave unset for a room shared across
+    # multiple boards, where every /ticket names its project directly
+    # (e.g. "/ticket CK @user ..." instead of "/ticket @user ...").
+    project_key: Optional[str] = None
     name: str = ""
 
 

@@ -20,7 +20,13 @@ mappings, or credentials are hardcoded anywhere in the code.
 
 ## How it works
 
-- Each Matrix room you configure is mapped to exactly one Jira project.
+- Each Matrix room you configure can optionally map to one default Jira
+  project. `/comment`, `/assign`, and `/status` never need this — the issue
+  key (e.g. `CK-130`) already says which project they act on. Only `/ticket`
+  (which creates a new issue) needs to know a project, so a room without a
+  default project just requires it explicitly: `/ticket CK @user <summary>`
+  instead of `/ticket @user <summary>`. This is what lets you either run one
+  room per board, or one shared room covering every board at once.
 - The bot stays connected to Matrix (long-polling `/sync`) and watches only the
   rooms listed in your config.
 - A message starting with any of the configured `command_prefixes` (default `["/"]`) is
@@ -92,7 +98,7 @@ See [`config.example.yaml`](config.example.yaml) for the full annotated example.
 | `matrix.access_token` | The bot's long-lived access token |
 | `matrix.device_id` | Optional; leave blank to let the server assign one |
 | `matrix.rooms[].room_id` | Matrix room ID |
-| `matrix.rooms[].project_key` | Jira project key that room maps to |
+| `matrix.rooms[].project_key` | Optional default project for `/ticket` in that room. Omit for a room shared across multiple boards, where every `/ticket` names its project explicitly |
 | `matrix.rooms[].name` | Free-text label, logging only |
 | `jira.url` | Your Jira base URL |
 | `jira.token` | A Jira Personal Access Token |
@@ -106,7 +112,7 @@ See [`config.example.yaml`](config.example.yaml) for the full annotated example.
 
 | Command | Usage | Effect |
 |---|---|---|
-| `/ticket` | `/ticket @user <summary>` | Creates an issue in the room's project, assigned to `@user` |
+| `/ticket` | `/ticket [PROJECT] @user <summary>` | Creates an issue assigned to `@user`, in `PROJECT` if given, otherwise the room's default project |
 | `/comment` | `/comment <KEY> <text>` | Adds a comment to an existing issue |
 | `/assign` | `/assign <KEY> @user` | Reassigns an existing issue |
 | `/status` | `/status <KEY> <status name>` | Transitions an issue to a new status, if a valid transition exists |
