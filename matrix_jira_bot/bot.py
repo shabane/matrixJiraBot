@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timedelta, timezone
 
 from nio import AsyncClient, MatrixRoom, RoomMessageText
 from nio.responses import RoomGetEventResponse
@@ -15,6 +16,13 @@ from .config import Config
 from .jira_client import JiraClient
 
 log = logging.getLogger("matrix_jira_bot")
+
+
+def _parse_jira_ts(value: str) -> datetime:
+    """Parses a Jira timestamp like '2026-09-22T21:23:43.278+0000' (only the
+    date/time portion; timezone offset is ignored since Jira always reports
+    in a fixed offset and we only ever compare these amongst themselves)."""
+    return datetime.strptime(value[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
 
 
 def _strip_reply_fallback(body: str) -> str:
@@ -112,6 +120,83 @@ class Bot:
         original_sender = getattr(resp.event, "sender", "someone")
         return f"{original_sender}: {original_body}"
 
+    async def _poll_status_changes(self) -> None:
+        """Background loop: periodically checks watched Jira projects for
+        status transitions and announces them in the room(s) configured to
+        watch that project. This is a workaround for not being able to
+        receive Jira webhooks (push) in some deployments -- see README."""
+        watched = self.config.watched_projects()
+        if not watched:
+            return  # no room configures watch_projects; nothing to do
+
+        seen_changelog_ids: set[str] = set()
+        startup_dt = datetime.fromtimestamp(self.start_ts_ms / 1000, tz=timezone.utc)
+        since_dt = startup_dt
+        interval = self.config.status_poll_interval_seconds
+
+        log.info(
+            "Status polling enabled: watching %s every %ss",
+            {k: v for k, v in watched.items()}, interval,
+        )
+
+        while True:
+            await asyncio.sleep(interval)
+            poll_start = datetime.now(timezone.utc)
+            # JQL date literals are minute-granular, so we deliberately
+            # over-fetch with a small overlap and rely on seen_changelog_ids
+            # to dedupe rather than trying to be precise with the window.
+            since_jql = (since_dt - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M")
+
+            try:
+                issues = await asyncio.to_thread(
+                    self.jira.search_updated_issues, list(watched.keys()), since_jql
+                )
+            except Exception:
+                log.exception("Status polling: failed to query Jira")
+                since_dt = poll_start
+                continue
+
+            for issue in issues:
+                key = issue["key"]
+                fields = issue["fields"]
+                project_key = fields["project"]["key"]
+                rooms_to_notify = watched.get(project_key, [])
+                if not rooms_to_notify:
+                    continue
+
+                for history in issue.get("changelog", {}).get("histories", []):
+                    history_id = history["id"]
+                    if history_id in seen_changelog_ids:
+                        continue
+                    seen_changelog_ids.add(history_id)
+                    if _parse_jira_ts(history["created"]) < startup_dt:
+                        continue
+
+                    status_change = next(
+                        (item for item in history.get("items", []) if item.get("field") == "status"),
+                        None,
+                    )
+                    if status_change is None:
+                        continue
+
+                    author = (history.get("author") or {}).get("displayName", "Someone")
+                    message = (
+                        f"\U0001F504 [{project_key}] {key} moved: "
+                        f"{status_change.get('fromString')} → {status_change.get('toString')} "
+                        f"({author})\n{self.jira.issue_url(key)}"
+                    )
+                    for room_id in rooms_to_notify:
+                        try:
+                            await self.client.room_send(
+                                room_id=room_id,
+                                message_type="m.room.message",
+                                content={"msgtype": "m.text", "body": message},
+                            )
+                        except Exception:
+                            log.exception("Status polling: failed to notify room %s", room_id)
+
+            since_dt = poll_start
+
     async def run(self) -> None:
         self.client.add_event_callback(self.on_message, RoomMessageText)
 
@@ -123,12 +208,20 @@ class Bot:
 
         for room in self.config.matrix.rooms:
             await self.client.join(room.room_id)
-            log.info("Watching room %s (%s -> project %s)", room.room_id, room.name or "unnamed", room.project_key)
+            log.info(
+                "Watching room %s (%s), default project=%s, status watch=%s",
+                room.room_id, room.name or "unnamed", room.project_key or "none", room.watch_projects or "none",
+            )
 
         # One full-state sync to load initial room state, then incremental syncs only --
         # passing full_state=True to sync_forever would (incorrectly) re-request full
         # state on every poll, not just the first.
         await self.client.sync(timeout=30000, full_state=True)
 
+        status_poll_task = asyncio.create_task(self._poll_status_changes())
+
         log.info("matrix-jira-bot is running.")
-        await self.client.sync_forever(timeout=30000)
+        try:
+            await self.client.sync_forever(timeout=30000)
+        finally:
+            status_poll_task.cancel()

@@ -1,8 +1,10 @@
 # matrix-jira-bot
 
-A Matrix bot that lets you manage Jira issues by typing commands in a chat room —
-one room per Jira board/project. Fully config-driven: no Matrix room IDs, user
-mappings, or credentials are hardcoded anywhere in the code.
+A Matrix bot that lets you manage Jira issues by typing commands in a chat room
+— one room per Jira board, or one shared room for everything. It can also
+watch Jira and announce status changes back into the room. Fully
+config-driven: no Matrix room IDs, user mappings, or credentials are
+hardcoded anywhere in the code.
 
 ```
 /ticket @honarkar Fix the login page timeout
@@ -36,8 +38,17 @@ mappings, or credentials are hardcoded anywhere in the code.
   your client sends one (`m.mentions`).
 - After running a command, the bot replies in-thread with a confirmation or an
   error, so the room always shows what happened.
+- Reply to any message with `/ticket`, and that message's text is folded into
+  the new issue's description -- useful for turning a bug report or request
+  already in the room into a ticket without retyping it.
 - The bot ignores its own messages and anything sent before it started, so it
   can't trigger itself or replay old history on restart.
+- Optionally, the bot can also poll Jira and announce status changes back
+  into a room (`watch_projects` + `status_poll_interval_seconds` -- see
+  below). This is a workaround for deployments that can't receive real Jira
+  webhooks (e.g. a firewall blocking inbound connections from Jira); if yours
+  can, a webhook receiver is the better fit for that direction and this bot
+  doesn't need to do it.
 
 ## Requirements
 
@@ -99,11 +110,13 @@ See [`config.example.yaml`](config.example.yaml) for the full annotated example.
 | `matrix.device_id` | Optional; leave blank to let the server assign one |
 | `matrix.rooms[].room_id` | Matrix room ID |
 | `matrix.rooms[].project_key` | Optional default project for `/ticket` in that room. Omit for a room shared across multiple boards, where every `/ticket` names its project explicitly |
+| `matrix.rooms[].watch_projects` | Optional list of project keys whose Jira status changes get announced in that room (see status polling, below). Independent of `project_key` |
 | `matrix.rooms[].name` | Free-text label, logging only |
 | `jira.url` | Your Jira base URL |
 | `jira.token` | A Jira Personal Access Token |
 | `jira.default_issue_type` | Issue type used by `/ticket` (e.g. `Task`) |
 | `command_prefixes` | List of prefixes that mark a message as a command, e.g. `["/", "!"]` (default `["/"]`) |
+| `status_poll_interval_seconds` | How often (seconds) to poll Jira for status changes on any room's `watch_projects` (default `30`). Ignored if no room sets `watch_projects` |
 | `users[].alias` | Short name used in commands, e.g. `honarkar` for `@honarkar` |
 | `users[].matrix_id` | That person's full Matrix user ID |
 | `users[].jira_username` | That person's Jira username |
@@ -117,14 +130,39 @@ See [`config.example.yaml`](config.example.yaml) for the full annotated example.
 | `/assign` | `/assign <KEY> @user` | Reassigns an existing issue |
 | `/status` | `/status <KEY> <status name>` | Transitions an issue to a new status, if a valid transition exists |
 
+## Status polling (Jira → Matrix)
+
+Commands only cover Matrix → Jira. To also hear about changes made directly
+in Jira (someone moving a card on the board, changing status in the Jira UI,
+etc.), set `watch_projects` on a room:
+
+```yaml
+rooms:
+  - room_id: "!general:example.org"
+    watch_projects: ["CK", "CLM"]
+    name: "General"
+```
+
+Every `status_poll_interval_seconds`, the bot checks the watched projects for
+issues updated since its last check, and announces any status transitions it
+finds:
+
+```
+🔄 [CK] CK-130 moved: In Progress → Done (Arya)
+https://jira.example.org/browse/CK-130
+```
+
+This is pull-based (the bot asks Jira), so it needs no inbound network access
+at all -- unlike a real Jira webhook, which needs Jira to be able to reach the
+bot. Use this if that's not possible in your network (e.g. a firewall between
+Jira and wherever the bot runs); it's less instant than a webhook (bounded by
+the poll interval) but works anywhere the bot can reach Jira outbound.
+
 ## Notes / limitations
 
-- This is a one-way command bot, not a full Jira↔Matrix sync — it doesn't mirror
-  Jira activity back into the room. Pair it with a webhook or poller on the
-  Jira side if you also want that direction.
 - `/status` only works if the target status is reachable via a workflow
   transition from the issue's current status; the error message lists what is
   actually available if the one you typed isn't.
-- Any mention typed in a watched room that starts with the command prefix is
+- Any message typed in a watched room that starts with the command prefix is
   treated as a command attempt. Plain conversation (no leading `/`) is always
   ignored.

@@ -102,3 +102,24 @@ class JiraClient:
 
     def issue_url(self, issue_key: str) -> str:
         return f"{self.base_url}/browse/{issue_key}"
+
+    def search_updated_issues(self, project_keys: list[str], since_jql_time: str) -> list[dict]:
+        """Returns issues (with their changelog) in the given projects updated
+        since since_jql_time (Jira JQL date literal, minute precision --
+        "YYYY-MM-DD HH:MM"). Used by the status-change poller; the caller is
+        expected to dedupe individual changelog entries itself, since JQL's
+        minute-level granularity means the same issue can legitimately show
+        up across multiple poll cycles."""
+        project_clause = " OR ".join(f"project = {p}" for p in project_keys)
+        resp = self.session.get(
+            self._url("/rest/api/2/search"),
+            params={
+                "jql": f"({project_clause}) AND updated >= \"{since_jql_time}\"",
+                "fields": "summary,status,project",
+                "expand": "changelog",
+                "maxResults": 50,
+            },
+        )
+        if not resp.ok:
+            raise JiraError(f"Failed to search for status changes: {resp.status_code} {resp.text}")
+        return resp.json().get("issues", [])

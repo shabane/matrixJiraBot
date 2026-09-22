@@ -17,15 +17,23 @@ matrix:
   # project explicitly: "/ticket CK @user ...". /comment, /assign, and
   # /status are unaffected either way since they take an issue key, which
   # already says which project it belongs to.
+  #
+  # watch_projects is a separate, independent list: project keys whose status
+  # changes in Jira get announced in that room (see status_poll_interval_seconds
+  # below). It's unrelated to project_key -- set both, either, or neither.
   rooms:
     - room_id: "!aaaaaaaaaaaaaaaaaa:example.org"
       project_key: "CK"
+      watch_projects: ["CK"]
       name: "Kanban board"      # for logging only, not required by the bot
     - room_id: "!bbbbbbbbbbbbbbbbbb:example.org"
       project_key: "CLM"
+      watch_projects: ["CLM"]
       name: "CLM scrum board"
-    # Example of a single shared room covering every board -- no project_key:
+    # Example of a single shared room covering every board -- no project_key,
+    # and watching status changes on both at once:
     # - room_id: "!cccccccccccccccccc:example.org"
+    #   watch_projects: ["CK", "CLM"]
     #   name: "All Jira activity"
 
 jira:
@@ -39,6 +47,13 @@ jira:
 command_prefixes:
   - "/"
   - "!"
+
+# How often (seconds) to poll Jira for status changes on any room's
+# watch_projects. Only relevant if at least one room sets watch_projects;
+# ignored otherwise. This exists because not every deployment can receive
+# real Jira webhooks (e.g. a firewall blocking inbound connections from
+# Jira) -- polling is a pull-based fallback that needs no inbound access.
+status_poll_interval_seconds: 30
 
 # Maps a short @alias (used in /ticket and /assign, and matched against
 # real Matrix mentions when your client sends them) to a Matrix user ID
