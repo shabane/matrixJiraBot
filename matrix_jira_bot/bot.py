@@ -142,60 +142,70 @@ class Bot:
         while True:
             await asyncio.sleep(interval)
             poll_start = datetime.now(timezone.utc)
-            # JQL date literals are minute-granular, so we deliberately
-            # over-fetch with a small overlap and rely on seen_changelog_ids
-            # to dedupe rather than trying to be precise with the window.
-            since_jql = (since_dt - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M")
-
             try:
-                issues = await asyncio.to_thread(
-                    self.jira.search_updated_issues, list(watched.keys()), since_jql
-                )
+                notified = await self._run_one_status_poll(watched, since_dt, startup_dt, seen_changelog_ids)
+                log.info("Status polling: cycle complete, %d notification(s) sent", notified)
             except Exception:
-                log.exception("Status polling: failed to query Jira")
+                # This loop is a fire-and-forget asyncio.create_task(); if anything here
+                # raised uncaught, the whole task would die silently forever with no
+                # further polling and no log output at all. Catching at the top level
+                # (not just around the Jira search) is what keeps a single bad cycle
+                # from taking down status polling permanently.
+                log.exception("Status polling: cycle failed")
+            finally:
                 since_dt = poll_start
+
+    async def _run_one_status_poll(
+        self, watched: dict[str, list[str]], since_dt: datetime, startup_dt: datetime,
+        seen_changelog_ids: set[str],
+    ) -> int:
+        # JQL date literals are minute-granular, so we deliberately over-fetch with a
+        # small overlap and rely on seen_changelog_ids to dedupe rather than trying to
+        # be precise with the window.
+        since_jql = (since_dt - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M")
+        issues = await asyncio.to_thread(self.jira.search_updated_issues, list(watched.keys()), since_jql)
+
+        notified = 0
+        for issue in issues:
+            key = issue["key"]
+            fields = issue["fields"]
+            project_key = fields["project"]["key"]
+            rooms_to_notify = watched.get(project_key, [])
+            if not rooms_to_notify:
                 continue
 
-            for issue in issues:
-                key = issue["key"]
-                fields = issue["fields"]
-                project_key = fields["project"]["key"]
-                rooms_to_notify = watched.get(project_key, [])
-                if not rooms_to_notify:
+            for history in issue.get("changelog", {}).get("histories", []):
+                history_id = history["id"]
+                if history_id in seen_changelog_ids:
+                    continue
+                seen_changelog_ids.add(history_id)
+                if _parse_jira_ts(history["created"]) < startup_dt:
                     continue
 
-                for history in issue.get("changelog", {}).get("histories", []):
-                    history_id = history["id"]
-                    if history_id in seen_changelog_ids:
-                        continue
-                    seen_changelog_ids.add(history_id)
-                    if _parse_jira_ts(history["created"]) < startup_dt:
-                        continue
+                status_change = next(
+                    (item for item in history.get("items", []) if item.get("field") == "status"),
+                    None,
+                )
+                if status_change is None:
+                    continue
 
-                    status_change = next(
-                        (item for item in history.get("items", []) if item.get("field") == "status"),
-                        None,
-                    )
-                    if status_change is None:
-                        continue
-
-                    author = (history.get("author") or {}).get("displayName", "Someone")
-                    message = (
-                        f"\U0001F504 [{project_key}] {key} moved: "
-                        f"{status_change.get('fromString')} → {status_change.get('toString')} "
-                        f"({author})\n{self.jira.issue_url(key)}"
-                    )
-                    for room_id in rooms_to_notify:
-                        try:
-                            await self.client.room_send(
-                                room_id=room_id,
-                                message_type="m.room.message",
-                                content={"msgtype": "m.text", "body": message},
-                            )
-                        except Exception:
-                            log.exception("Status polling: failed to notify room %s", room_id)
-
-            since_dt = poll_start
+                author = (history.get("author") or {}).get("displayName", "Someone")
+                message = (
+                    f"\U0001F504 [{project_key}] {key} moved: "
+                    f"{status_change.get('fromString')} → {status_change.get('toString')} "
+                    f"({author})\n{self.jira.issue_url(key)}"
+                )
+                for room_id in rooms_to_notify:
+                    try:
+                        await self.client.room_send(
+                            room_id=room_id,
+                            message_type="m.room.message",
+                            content={"msgtype": "m.text", "body": message},
+                        )
+                        notified += 1
+                    except Exception:
+                        log.exception("Status polling: failed to notify room %s", room_id)
+        return notified
 
     async def run(self) -> None:
         self.client.add_event_callback(self.on_message, RoomMessageText)
